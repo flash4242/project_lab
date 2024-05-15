@@ -1,14 +1,14 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.decomposition import PCA
-
-'''
 import torch
 from torch.utils.data import Dataset, SubsetRandomSampler, DataLoader
 from torch import nn
 import torch.nn.functional as F
 from torch import optim
+from sklearn.model_selection import train_test_split
+from sklearn.decomposition import PCA
+
+
 
 
 # check if CUDA is available
@@ -18,20 +18,20 @@ if not train_on_gpu:
     print('CUDA is not available.  Training on CPU ...')
 else:
     print('CUDA is available!  Training on GPU ...')
-'''
+
 
 # .T transzponált azért kell, mert a páciensek oszloponként vannak az eredeti táblázatban
-bc_df = pd.read_csv('bc_data_mrna_illumina_microarray.txt', sep='\t') \
+bc_df = pd.read_csv('/home/daniel/data/david/cancer_types/bc_mrna.txt', sep='\t') \
     .T \
     .drop(index=['Entrez_Gene_Id']) \
     .reset_index()
 
-g_df = pd.read_csv('glioblastoma_data_mrna_agilent_microarray.txt', sep='\t') \
+g_df = pd.read_csv('/home/daniel/data/david/cancer_types/g_mrna.txt', sep='\t') \
     .T \
+    .drop(index=['Entrez_Gene_Id']) \
     .reset_index()
 
-
-ov_df = pd.read_csv('ovarian_data_mrna_agilent_microarray.txt', sep='\t') \
+ov_df = pd.read_csv('/home/daniel/data/david/cancer_types/ov_mrna.txt', sep='\t') \
     .T \
     .drop(index=['Entrez_Gene_Id']) \
     .reset_index()
@@ -49,6 +49,7 @@ ov_df = ov_df.loc[:,~ov_df.columns.duplicated()].copy()
 
 
 # drop the first column (the "Hugo_Symbol" string and the patient IDs) then the first row (because we named the columns after the hugo_symbols)
+# sort columns alphabetically
 # replace NaN values with median
 bc_df = bc_df.iloc[:, 1:] \
     .drop(0)
@@ -58,15 +59,14 @@ g_df = g_df.iloc[:, 1:] \
     .drop(0)
 g_df = g_df.fillna(g_df.median())
 
+
 ov_df = ov_df.iloc[:, 1:] \
     .drop(0)
 ov_df = ov_df.fillna(ov_df.median())
 
 # check the dataframes' structure:
-# print(bc_df.head())
-# print('\n')
+# print(bc_df.head(), '\n')
 # print(g_df.head())
-'''
 
 # it retains only the merged columns
 merged_df = pd.concat([bc_df, g_df, ov_df], join='inner', ignore_index=True)
@@ -85,10 +85,10 @@ merged_df_pca = pd.DataFrame(X_pca, columns=[f'PC{i+1}' for i in range(X_pca.sha
 from sklearn import preprocessing
 
 min_max_scaler = preprocessing.MinMaxScaler()
-merged_df = pd.DataFrame(min_max_scaler.fit_transform(merged_df))
+merged_df = pd.DataFrame(min_max_scaler.fit_transform(merged_df_pca))
 
 # make the labels
-cancer_types = {0: "Breast cancer", 1: "Glioblastomaa", 2: "Ovarian cancer"}
+cancer_types = {0: "Breast cancer", 1: "Glioblastoma", 2: "Ovarian cancer"}
 
 bc_labels = pd.Series(0, index=range(bc_df.shape[0]))
 g_labels = pd.Series(1, index=range(g_df.shape[0]))
@@ -109,7 +109,7 @@ labeled_combined_df = labeled_combined_df.sample(frac=1, random_state=42)
 train_val, test = train_test_split(labeled_combined_df, test_size=0.2, random_state=42)
 train, val = train_test_split(train_val, test_size=0.25, random_state=42)
 
-print(train.head())
+# print(train.head())
 
 
 # make the tensors
@@ -144,7 +144,7 @@ testloader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.fc1 = nn.Linear(32, 32)
+        self.fc1 = nn.Linear(train.shape[1]-1, 32) # train.shape[1]-1, because train contains the labels' column too
         self.fc2 = nn.Linear(32, 32)
         self.fc3 = nn.Linear(32, len(cancer_types)) 
 
@@ -168,11 +168,11 @@ if train_on_gpu:
 
 # specify loss function (categorical cross-entropy) and optimizer
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.AdamW(model.parameters(), lr=0.01)
+optimizer = optim.SGD(model.parameters(), lr=0.05)
 
 
 # -------- TRAINING ----------
-n_epochs = 50
+n_epochs = 60
 valid_loss_min = np.Inf # track change in validation loss
 
 for epoch in range(1, n_epochs+1):
@@ -186,11 +186,12 @@ for epoch in range(1, n_epochs+1):
     ###################
     model.train()
     for data, target in trainloader:
+        target = target.type(torch.LongTensor)
         if train_on_gpu:         # move tensors to GPU if CUDA is available
             data, target = data.cuda(), target.cuda()
         optimizer.zero_grad()
-        output = model(data) 
-        loss = criterion(output, target)
+        output = model(data)
+        loss = criterion(output, target.squeeze(-1))
         loss.backward()
         optimizer.step()
         train_loss += loss.item()*data.size(0)
@@ -200,10 +201,11 @@ for epoch in range(1, n_epochs+1):
     ######################
     model.eval()
     for data, target in validationloader:
+        target = target.type(torch.LongTensor)
         if train_on_gpu:
             data, target = data.cuda(), target.cuda()
         output = model(data)
-        loss = criterion(output, target)
+        loss = criterion(output, target.squeeze(-1))
         valid_loss += loss.item()*data.size(0)
     
     # calculate average losses
@@ -219,37 +221,41 @@ for epoch in range(1, n_epochs+1):
         print('Validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(
         valid_loss_min,
         valid_loss))
-        torch.save(model.state_dict(), 'model_cancer.pth')
+        torch.save(model.state_dict(), 'mlp_model.pth')
         valid_loss_min = valid_loss
 
 
 # load the model with the lowest val_loss
-model.load_state_dict(torch.load('model_cancer.pth'))
+model.load_state_dict(torch.load('mlp_model.pth'))
 
 
 # -------------- TEST --------------
 # track test loss
 test_loss = 0.0
-n_classes = cancer_types.len
+n_classes = len(cancer_types)
 class_correct = list(0. for i in range(n_classes))
 class_total = list(0. for i in range(n_classes))
 
 model.eval()
 for data, target in testloader:
+    target = target.type(torch.LongTensor)
     if train_on_gpu:
         data, target = data.cuda(), target.cuda()
     output = model(data)
-    loss = criterion(output, target)
+    loss = criterion(output, target.squeeze(-1))
     test_loss += loss.item()*data.size(0)
     # convert output probabilities to predicted class
     _, pred = torch.max(output, 1)    
+    # ANOTHER IDEA FOR G. 0%: preds = np.squeeze(pred.numpy()) if not train_on_gpu else np.squeeze(pred.cpu().numpy()) # WHAT DOES IT PREDICT?
+
     # compare predictions to true label
     correct_tensor = pred.eq(target.data.view_as(pred))
     correct = np.squeeze(correct_tensor.numpy()) if not train_on_gpu else np.squeeze(correct_tensor.cpu().numpy())
     # calculate test accuracy for each object class
     for i in range(batch_size):
-        label = target.data[i]
-        class_correct[label] += correct[i].item()
+        idx = min(i, target.data.shape[0]-1)
+        label = target.data[idx]
+        class_correct[label] += correct[idx].item()
         class_total[label] += 1
 
 # average test loss
@@ -267,4 +273,3 @@ for i in range(n_classes):
 print('\nTest Accuracy (Overall): %2d%% (%2d/%2d)' % (
     100. * np.sum(class_correct) / np.sum(class_total),
     np.sum(class_correct), np.sum(class_total)))
-'''
